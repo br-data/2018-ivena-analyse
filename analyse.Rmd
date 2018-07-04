@@ -1,0 +1,148 @@
+---
+title: "IVENA Analyse"
+subtitle: "Untersuchung der Versorgungskapazitäten der Münchner Krankenhäuser im Bereich Geburtshilfe"
+author: Niels Ringler (BR Data)
+output:
+  html_document:
+    code_folding: hide
+    css: style/styles.css
+---
+
+```{r setup, include = T}
+knitr::opts_chunk$set(
+  warning = F,
+  message = F,
+  fig.width = 8,
+  out.width = '100%')
+```
+
+## Über das [Projekt](https://www.br.de/nachrichten/geburtsstationen-in-muenchen-nachts-wirds-eng-100.html)
+
+Das [IVENA-System](https://www.ivena-muenchen.de/leitstellenansicht.php?si=&bereich_id=103001&fb_id=fb00000000310_01) (interdisziplinärer Versorgungsnachweis) gibt die verfügbaren Kapazitäten in den Münchner Krankenhäusern nach Disziplin und Zeitpunkt an. Wir haben die Kapazitäten der Geburtshilfe ab der 36. Schwangerschaftswoche gesammelt.
+
+
+# Daten
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+update_geom_defaults("col",   list(fill = "#3a9ccf"))
+
+load("data/methoden.Rdat")
+
+ivena_data <- ivena_data %>% filter(!name == "_Musterklinikum")
+
+```
+
+* Zeitraum: `r ivena_data$german_time %>% min() %>% format("%B %Y")` - `r ivena_data$german_time %>% max() %>% format("%B %Y")` (= `r ivena_data$german_time %>% as.Date() %>% unique() %>% length()` Tage) - alle 10 Minuten.
+
+* Anzahl der Kliniken: `r ivena_data %>% summarise(n_distinct(name))`
+```{r results='asis'}
+cat(paste('\t + ', ivena_data$name %>% unique()), sep = '\n')
+```
+
+Die *Wolfartklinik* liefert seit `r ivena_data %>% filter(name == "Wolfartklinik") %>% pull(german_time) %>% max() %>% format("%B %Y")` keine Daten mehr.
+
+Da die Nutzung von IVENA freiwillig ist und nicht alle Kliniken ein Perinatalzentrum zur Versorgung von Frühgeborenen besitzen („Level 1-3“), können die Kliniken nicht direkt untereinander verglichen werden. Daher haben wir die Namen der Kliniken in der Auswertung unkenntlich gemacht und verzichten an dieser Stelle auf eine Veröffentlichung der Rohdaten.
+
+```{r}
+pseudonyms <- ivena_data %>% 
+  distinct(name) %>% 
+  mutate(pseudonym = paste0("Klinik_", sample(LETTERS[-9], n()), sample(0:9, n(), replace = T)))
+
+ivena_data <- ivena_data %>%
+  mutate(name = recode(name, !!!split(pseudonyms$pseudonym, pseudonyms$name)))
+```
+
+## Anmerkung
+
+Ob ein Krankenhaus Kapazitäten frei hat oder nicht, zeigt IVENA durch ein grünes (frei), oder rotes (nicht frei) Feld an, wobei ein Feld einem Zeitraum von 10 Minuten entspricht.
+
+Als *Abmeldung* verstehen wir, wenn eine Klinik den Status bei IVENA auf rot gesetzt hat, wenn sie also angibt, keine Kapazitäten mehr frei zu haben.
+
+Zählt man über einen bestimmten Zeitraum die abgemeldeten Zeiträume (rote Felder), kann man sie ins Verhältnis zum Gesamtzeitraum (alle Felder) setzen und somit den Anteil der Abmeldungen (in Prozent) berechnen. Diesen Anteil bezeichnen wir mit *Abmeldequote*.
+
+![*Screenshot vom 4. Juli 2018*, [IVENA](https://www.ivena-muenchen.de/leitstellenansicht.php?si=&bereich_id=103001&fb_id=fb00000000310_01)](chart/ivena-example.jpg)
+
+*Als Beispiel*:
+Zwei Stunden, z.B. 9 - 11 Uhr, teilt IVENA in zwölf Felder (09:00 - 09:10, 09:10 - 09:20, ..., 10:50 - 11:00) ein. Angenommen eine Klinik ist an drei dieser Zeiträume abgemeldet (d.h. drei von zwölf Feldern sind rot), dann wäre die Abmeldequote dieser Klinik im betrachteten Zeitraum 0 - 2 Uhr: 3 / 12 = 25%.
+
+
+
+# Analyse
+
+Im [Online-Artikel](https://www.br.de/nachrichten/geburtsstationen-in-muenchen-nachts-wirds-eng-100.html) zeigen wir:
+
+```{r}
+
+# Top 5 Kliniken (nach Auslastung)
+
+top_n_hospitals <- ivena_data %>%
+  count(name, available) %>%
+  group_by(name) %>%
+  mutate(perc = n / sum(n)) %>%
+  filter(available == F) %>%
+  ungroup() %>% 
+  top_n(5, perc) %>% 
+  arrange(-perc) %>% 
+  pull(name)
+
+
+ivena_data %>%
+  filter(name %in% top_n_hospitals) %>% 
+  # aggregate hours: 2h intervals
+  mutate(hour = ifelse(as.POSIXlt(german_time)$hour %% 2 == 0,
+         #7 <- 8, 9 <- 10, ..., 23 <- 0 
+         (as.POSIXlt(german_time)$hour - 1) %% 24,
+         as.POSIXlt(german_time)$hour)) %>%
+  count(available, hour) %>%
+  group_by(hour) %>%
+  mutate(perc = n / sum(n)) %>%
+  filter(available == F) %>%
+  ungroup() %>% 
+  mutate(hour = as.character(hour)) %>% 
+  ggplot(aes(x = hour, y = perc)) +
+    geom_col() +
+    scale_x_discrete(limits=seq(9, 9 + 23, 2) %% 24 %>% as.character(),
+                     labels = paste0(seq(9, 9 + 23, 2) %% 24, "-", 
+                                     (as.numeric(seq(9, 9 + 23, 2) %% 24) + 2) %% 24, "h")) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(title = "Abmeldequote der fünf am häufigsten abgemeldeten Geburtsstationen",
+         x = "Uhrzeit",
+         y = "Abmeldungsquote") + 
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90))
+
+```
+
+Im folgenden Diagramm zeigen wir, dass der Verlauf der oberen Abmeldungsquote nicht nur im Durchschnitt, sondern in jeder einzelnen der fünf am häufigsten abgemeldeten Geburtsstationen sichtbar ist:
+
+```{r auslastung-tageszeit}
+ivena_data %>%
+  filter(name %in% top_n_hospitals) %>% 
+  # aggregate hours: 2h intervals
+  mutate(hour = ifelse(as.POSIXlt(german_time)$hour %% 2 == 0,
+         #7 <- 8, 9 <- 10, ..., 23 <- 0 
+         (as.POSIXlt(german_time)$hour - 1) %% 24,
+         as.POSIXlt(german_time)$hour)) %>%
+  count(name, available, hour) %>%
+  group_by(name, hour) %>%
+  mutate(perc = n / sum(n)) %>%
+  filter(available == F) %>%
+  ungroup() %>% 
+  mutate(hour = as.character(hour)) %>% 
+  ggplot(aes(x = hour, y = perc)) +
+    geom_col() +
+    scale_x_discrete(limits=seq(9, 9 + 23, 2) %% 24 %>% as.character(),
+                     labels = paste0(seq(9, 9 + 23, 2) %% 24, "-", 
+                                     (as.numeric(seq(9, 9 + 23, 2) %% 24) + 2) %% 24, "h")) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(title = "Abmeldungsquote der fünf am häufigsten abgemeldeten Geburtsstationen",
+         x = "Uhrzeit",
+         y = "Abmeldungsquote") + 
+    guides(fill=FALSE) +
+    facet_wrap(~name) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90))
+```
